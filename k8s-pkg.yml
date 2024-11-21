@@ -147,6 +147,12 @@
         state: started
         enabled: true
 
+    - name: install Docker
+      yum:
+        name: docker
+        state: present
+        update_cache: true
+
 - hosts: masters
   become: yes
   tasks:
@@ -171,4 +177,3 @@
     - name: Riavvia tutte le macchine
       reboot:
         reboot_timeout: 600
-
