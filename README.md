@@ -9,4 +9,4 @@ You need these machines:
 If you can allocate more compute resources, its better
 If you change your machine IP's then you have to change those whereever
 those were referred.
-
+cambiare su k8s-master ip in base al master
