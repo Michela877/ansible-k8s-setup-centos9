@@ -1,0 +1,228 @@
+---
+- hosts: localhost  # Usa localhost o il nome della tua singola VM
+  become: yes
+  vars:
+    kube_network_cidr: "10.244.0.0/16"
+    apiserver_address: "0.0.0.0"  # Ascolta su tutti gli indirizzi
+    flannel_manifest_url: "https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+
+  tasks:
+    # Rimuovi versioni esistenti di Docker, containerd, kubelet, kubeadm
+    - name: Rimuovere Docker se presente
+      yum:
+        name: docker
+        state: absent
+
+    - name: Rimuovere Kubectl se presente
+      yum:
+        name: kubectl
+        state: absent
+
+    - name: Rimuovere containerd se presente
+      yum:
+        name: containerd.io
+        state: absent
+
+    - name: Rimuovere kubelet se presente
+      yum:
+        name: kubelet
+        state: absent
+
+    - name: Rimuovere kubeadm se presente
+      yum:
+        name: kubeadm
+        state: absent
+
+    # Disabilitare il firewall
+    - name: Disabilitare il firewall
+      service:
+        name: firewalld
+        state: stopped
+        enabled: false
+
+    # Disabilitare SWAP
+    - name: Disabilitare SWAP
+      shell: |
+        swapoff -a
+
+    # Rimuovere le voci di SWAP da /etc/fstab
+    - name: Rimuovere le voci di SWAP da /etc/fstab
+      lineinfile:
+        path: /etc/fstab
+        regexp: 'swap'
+        state: absent
+
+    # Disabilitare SELinux
+    - name: Disabilitare SELinux
+      command: setenforce 0
+      ignore_errors: yes
+
+    - name: Disabilitare SELinux al riavvio
+      selinux:
+        state: disabled
+
+    # Configurazioni kernel
+    - name: Assicurarsi che il modulo br_netfilter sia caricato
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Aggiungere br_netfilter a modules-load.d per la persistenza
+      lineinfile:
+        path: /etc/modules-load.d/br_netfilter.conf
+        line: br_netfilter
+        create: yes
+
+    - name: Configurare sysctl per Kubernetes
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      with_items:
+        - { name: net.bridge.bridge-nf-call-ip6tables, value: 1 }
+        - { name: net.bridge.bridge-nf-call-iptables, value: 1 }
+        - { name: net.ipv4.ip_forward, value: 1 }
+
+    # Aggiungere repository
+    - name: Aggiungere il repository Kubernetes
+      yum_repository:
+        name: Kubernetes-Alternative
+        description: Kubernetes YUM Repository (Alternative)
+        baseurl: https://mirrors.aliyun.com/kubernetes/yum/repos/kubernetes-el7-x86_64/
+        gpgkey: https://mirrors.aliyun.com/kubernetes/yum/doc/yum-key.gpg https://mirrors.aliyun.com/kubernetes/yum/doc/rpm-package-key.gpg
+        gpgcheck: yes
+        enabled: yes
+
+    - name: Aggiungere il repository ufficiale di Docker
+      yum_repository:
+        name: docker
+        description: Docker repository
+        baseurl: https://download.docker.com/linux/centos/7/x86_64/stable
+        enabled: yes
+        gpgcheck: yes
+        gpgkey: https://download.docker.com/linux/centos/gpg
+
+    # Installare pacchetti
+    - name: Installa containerd.io (versione 1.6.21)
+      yum:
+        name: containerd.io-1.6.21
+        state: present
+
+    - name: Configurare containerd per Kubernetes
+      shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+
+    - name: Avvia e abilita containerd
+      service:
+        name: containerd
+        state: started
+        enabled: true
+
+    - name: Installa kubelet, kubeadm, kubectl (versione 1.28.15)
+      yum:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - kubelet-1.28.15
+        - kubeadm-1.28.15
+        - kubectl-1.28.15
+
+    - name: Avvia e abilita kubelet
+      service:
+        name: kubelet
+        state: started
+        enabled: true
+
+    # Inizializzazione cluster
+    - name: Check if kubeadm init has already been run
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init_done
+
+    - name: Initialize K8S cluster (single-node)
+      shell: |
+        kubeadm init \
+          --pod-network-cidr={{ kube_network_cidr }} \
+          --apiserver-advertise-address={{ apiserver_address }} \
+          --ignore-preflight-errors=NumCPU \
+          --control-plane-endpoint=localhost
+      when: not kubeadm_init_done.stat.exists
+
+    - name: Configure kubectl for root user
+      file:
+        path: /root/.kube
+        state: directory
+        mode: 0755
+
+    - name: Copy admin.conf to kubectl config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: yes
+
+    # Rimuovere taint per permettere l'esecuzione di pod sul master
+    - name: Remove NoSchedule taint from master node
+      command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+      when: not kubeadm_init_done.stat.exists
+
+    - name: Remove NoSchedule taint from master node (alternative)
+      command: kubectl taint nodes --all node-role.kubernetes.io/master-
+      when: not kubeadm_init_done.stat.exists
+
+    # Configurazione rete
+    - name: Download Flannel manifest
+      get_url:
+        url: "{{ flannel_manifest_url }}"
+        dest: /tmp/kube-flannel.yml
+
+    - name: Install Pod network (Flannel)
+      command: kubectl apply -f /tmp/kube-flannel.yml
+      register: flannel_apply
+      retries: 5
+      delay: 10
+      until: flannel_apply.rc == 0
+
+    - name: Check Flannel pods status
+      shell: kubectl get pods -n kube-system -l app=flannel --no-headers | awk '{ print $3 }' | grep -v Running
+      register: flannel_status
+      retries: 5
+      delay: 15
+      failed_when: flannel_status.stdout != ""
+      changed_when: false
+
+    # Verifiche finali
+    - name: Check cluster status
+      command: kubectl cluster-info
+      register: cluster_check
+      retries: 3
+      delay: 5
+      failed_when: "'is running' not in cluster_check.stdout"
+
+    - name: Check node status
+      command: kubectl get nodes
+      register: node_status
+      retries: 5
+      delay: 10
+      failed_when: "'Ready' not in node_status.stdout"
+
+    # Kube-bench (opzionale)
+    - name: Download Kube-Bench tar file
+      shell: curl -L https://github.com/aquasecurity/kube-bench/releases/download/v0.6.2/kube-bench_0.6.2_linux_amd64.tar.gz -o /tmp/kube-bench_0.6.2_linux_amd64.tar.gz
+
+    - name: Extract Kube-Bench tar file
+      shell: tar -xvf /tmp/kube-bench_0.6.2_linux_amd64.tar.gz -C /tmp
+      args:
+        creates: /tmp/kube-bench
+
+    - name: Run Kube-Bench
+      shell: |
+        /tmp/kube-bench --config-dir /tmp/cfg --config /tmp/cfg/config.yaml
+      register: kube_bench_result
+      ignore_errors: true
+
+    - name: Output Kube-Bench results
+      debug:
+        var: kube_bench_result.stdout
