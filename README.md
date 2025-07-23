@@ -1,4 +1,4 @@
-# ansible-k8s-setup
+# ansible-k8s-setup-centos9
 This will setup a kubernetes cluster on Centos7 machines using ansible.
 You need these machines:
 1. Ansible controller - controller.example.com - 10.0.0.99 - 1 vcpu / 2 gib ram
