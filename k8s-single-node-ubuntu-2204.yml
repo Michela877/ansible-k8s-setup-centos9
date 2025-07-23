@@ -84,6 +84,7 @@
         - gnupg
         - lsb-release
         - software-properties-common
+        - wget
 
     # 🔐 Docker repository
     - name: Aggiungi chiave GPG Docker
