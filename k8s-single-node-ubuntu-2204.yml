@@ -1,0 +1,200 @@
+- hosts: localhost
+  become: yes
+  vars:
+    kube_network_cidr: "10.244.0.0/16"
+    apiserver_address: "0.0.0.0"
+    flannel_manifest_url: "https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml"
+    kube_version: "1.28.2"
+    containerd_version: "1.6.21-1"
+
+  tasks:
+
+    # 🔄 Reset cluster esistente
+    - name: Reset cluster Kubernetes
+      shell: |
+        kubeadm reset -f || true
+        rm -rf $HOME/.kube /etc/kubernetes
+      ignore_errors: yes
+
+    - name: Unhold pacchetti Kubernetes
+      shell: apt-mark unhold kubelet kubeadm kubectl kubernetes-cni || true
+      ignore_errors: yes
+
+    - name: Rimuovi pacchetti Kubernetes
+      shell: |
+        apt-get remove --purge --allow-change-held-packages -y {{ item }}
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+        - kubernetes-cni
+      ignore_errors: yes
+
+    - name: Rimuovi container runtime
+      shell: |
+        apt-get remove --purge -y {{ item }}
+      loop:
+        - docker.io
+        - docker-ce
+        - containerd
+      ignore_errors: yes
+
+    - name: Pulisci configurazioni residue
+      shell: |
+        rm -rf /var/lib/etcd /var/lib/kubelet /etc/kubernetes \
+               /var/lib/dockershim /var/lib/containerd \
+               /var/run/kubernetes /var/lib/cni
+      ignore_errors: yes
+
+    # ⚙️ Configurazione sistema
+    - name: Disabilita swap
+      shell: |
+        swapoff -a
+        sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+    - name: Carica moduli kernel
+      modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - br_netfilter
+        - overlay
+
+    - name: Configura sysctl
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+      loop:
+        - { name: net.bridge.bridge-nf-call-ip6tables, value: 1 }
+        - { name: net.bridge.bridge-nf-call-iptables, value: 1 }
+        - { name: net.ipv4.ip_forward, value: 1 }
+
+    # 📦 Installazione pacchetti base
+    - name: Installa pacchetti base
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - apt-transport-https
+        - ca-certificates
+        - curl
+        - gnupg
+        - lsb-release
+        - software-properties-common
+
+    # 🔐 Docker repository
+    - name: Aggiungi chiave GPG Docker
+      shell: |
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Aggiungi repository Docker
+      apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu jammy stable"
+        state: present
+        filename: docker
+
+    # 🔐 Kubernetes repository
+    - name: Aggiungi chiave GPG Kubernetes
+      shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+        chmod a+r /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-archive-keyring.gpg
+
+    - name: Aggiungi repository Kubernetes
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /"
+        state: present
+        filename: kubernetes
+
+    # 🐳 Installazione containerd
+    - name: Installa containerd
+      apt:
+        name: "containerd.io={{ containerd_version }}"
+        state: present
+
+    - name: Configura containerd
+      shell: |
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+        systemctl restart containerd
+
+    # 📦 Installazione Kubernetes
+    - name: Installa componenti Kubernetes
+      apt:
+        name: "{{ item }}"
+        state: present
+        allow_downgrade: yes
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    - name: Blocca aggiornamenti Kubernetes
+      shell: apt-mark hold kubelet kubeadm kubectl
+
+    # 🚀 Inizializzazione cluster
+
+    - name: Verifica se kubeadm init è già stato eseguito
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init_done
+
+    - name: Inizializza cluster Kubernetes
+      shell: |
+        kubeadm init \
+          --pod-network-cidr={{ kube_network_cidr }} \
+          --apiserver-advertise-address={{ apiserver_address }} \
+          --ignore-preflight-errors=NumCPU \
+          --control-plane-endpoint=localhost
+      when: not kubeadm_init_done.stat.exists
+      register: kubeadm_init
+      retries: 3
+      delay: 10
+      until: kubeadm_init.rc == 0
+
+    - name: Imposta permessi su admin.conf
+      file:
+        path: /etc/kubernetes/admin.conf
+        owner: "{{ ansible_user_id }}"
+        group: "{{ ansible_user_id }}"
+        mode: '0644'
+      when: kubeadm_init.rc == 0
+
+    - name: Configura kubectl per l'utente corrente
+      shell: |
+        mkdir -p $HOME/.kube
+        cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+        chown $(id -u):$(id -g) $HOME/.kube/config
+      when: kubeadm_init.rc == 0
+
+
+    # 🌐 Plugin di rete
+    - name: Installa Flannel
+      shell: kubectl apply -f {{ flannel_manifest_url }}
+      register: flannel_install
+      retries: 3
+      delay: 10
+      until: flannel_install.rc == 0
+
+    - name: Rimuovi taints dal nodo master
+      shell: |
+        kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
+        kubectl taint nodes --all node-role.kubernetes.io/master- || true
+      ignore_errors: yes
+
+    # ✅ Verifica finale
+    - name: Verifica stato cluster
+      shell: kubectl get nodes
+      register: node_status
+      until: "'Ready' in node_status.stdout"
+      retries: 10
+      delay: 15
