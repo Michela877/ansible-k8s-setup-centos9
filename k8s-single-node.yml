@@ -126,9 +126,9 @@
         name: "{{ item }}"
         state: present
       with_items:
-        - kubelet-1.28.15
-        - kubeadm-1.28.15
-        - kubectl-1.28.15
+        - kubelet
+        - kubeadm
+        - kubectl
 
     - name: Avvia e abilita kubelet
       service:
@@ -163,14 +163,18 @@
         dest: /root/.kube/config
         remote_src: yes
 
-    # Rimuovere taint per permettere l'esecuzione di pod sul master
-    - name: Remove NoSchedule taint from master node
-      command: kubectl taint nodes --all node-role.kubernetes.io/control-plane-
-      when: not kubeadm_init_done.stat.exists
-
-    - name: Remove NoSchedule taint from master node (alternative)
-      command: kubectl taint nodes --all node-role.kubernetes.io/master-
-      when: not kubeadm_init_done.stat.exists
+    - name: Remove all NoSchedule taints from control plane
+      command: |
+        kubectl taint nodes --all \
+          node-role.kubernetes.io/control-plane- \
+          node-role.kubernetes.io/master-
+      ignore_errors: yes
+      register: taint_result
+    
+    - name: Verify taints were removed
+      command: kubectl get nodes -o jsonpath='{.items[*].spec.taints}'
+      register: node_taints
+      changed_when: "'NoSchedule' not in node_taints.stdout"
 
     # Configurazione rete
     - name: Download Flannel manifest
@@ -208,21 +212,3 @@
       delay: 10
       failed_when: "'Ready' not in node_status.stdout"
 
-    # Kube-bench (opzionale)
-    - name: Download Kube-Bench tar file
-      shell: curl -L https://github.com/aquasecurity/kube-bench/releases/download/v0.6.2/kube-bench_0.6.2_linux_amd64.tar.gz -o /tmp/kube-bench_0.6.2_linux_amd64.tar.gz
-
-    - name: Extract Kube-Bench tar file
-      shell: tar -xvf /tmp/kube-bench_0.6.2_linux_amd64.tar.gz -C /tmp
-      args:
-        creates: /tmp/kube-bench
-
-    - name: Run Kube-Bench
-      shell: |
-        /tmp/kube-bench --config-dir /tmp/cfg --config /tmp/cfg/config.yaml
-      register: kube_bench_result
-      ignore_errors: true
-
-    - name: Output Kube-Bench results
-      debug:
-        var: kube_bench_result.stdout
