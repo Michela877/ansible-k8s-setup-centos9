@@ -16,6 +16,16 @@ sudo apt update && sudo apt upgrade -y
 
 sudo apt install git ansible
 sudo apt install -y python3 python3-apt python3-pip git curl
+Rimuovere allow_downgrade (se non ti serve esplicitamente forzare un downgrade):
+- name: Installa componenti Kubernetes
+  apt:
+    name: "{{ item }}"
+    state: present
+    allow_downgrade: yes   # ❌ ERRORE
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
 
 ansible-playbook k8s-single-node-ubuntu-2204.yml
 k8s-single-node-ubuntu-2204.yml
