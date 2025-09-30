@@ -12,6 +12,10 @@ those were referred.
 cambiare su k8s-master ip in base al master se si dimentica usare questo per resettare sudo kubeadm reset
 
 # installazione su vm singola ubuntu 22.04 solo per il file k8s-single-node-ubuntu-2204.yml necessita solo di :
+sudo apt update && sudo apt upgrade -y
+
 sudo apt install git ansible
+sudo apt install -y python3 python3-apt python3-pip git curl
+
 ansible-playbook k8s-single-node-ubuntu-2204.yml
 k8s-single-node-ubuntu-2204.yml
